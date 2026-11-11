@@ -144,17 +144,37 @@ Every change is recorded as a `points_change` event (who, old value, new value),
 
 ## 4. Assignment styles
 
-The household owner sets a **default style** for the household. Optionally, the owner can **override it per chore**.
+- **Household default style** (`households.default_assignment_style`): the style a new chore starts with.
+- **Each chore has its own style** (`chores.assignment_style`), set from the household default when the chore is created. The owner can change it per chore at any time. Changing the household default later does not change existing chores.
 
 | Style | How it works |
 |---|---|
-| **Fixed** | The owner picks the assignee, and it stays with that person |
-| **Rotation** | Moves through an ordered member list after each done or skip |
-| **Claim** | The chore has no regular assignee; any member clicks **🙋 Take it** to claim it |
-| **Random** | A random member is picked each new cycle |
-| **Balanced** | Goes to the member with the fewest story points this period |
+| **Fixed** | Always the same one person |
+| **Rotation** | Moves through the chore's members, in order, after each done or skip |
+| **Claim** | No regular assignee; a chore member clicks **🙋 Take it** to claim it |
+| **Random** | A random chore member is picked each new cycle |
+| **Balanced** | Goes to the chore member with the fewest story points this period |
 
-Rule: anyone in the household can mark a chore done. Points go to whoever did it (`last_done_by`).
+### Who each chore can go to (chore members)
+Each chore has its own list of **members**: the people it can be assigned to. This is what lets different chores rotate among different people.
+
+- **`everyone`** (default): the whole household. People who join the household later are included automatically.
+- **`selected`**: only the people the owner picks. For Rotation, the owner also sets their **order**.
+
+**Example: bathrooms**
+
+| Chore | Style | Chore members |
+|---|---|---|
+| Private bathroom (Sam's) | Fixed | Sam |
+| Shared bathroom (kids') | Rotation | Alex → Jordan → Riley |
+| Guest bathroom | Rotation | Everyone, or use **Claim** so anyone can take it |
+
+Rules:
+- Rotation, Random, Balanced and Claim only ever pick from the chore's members. Fixed uses the single chosen person.
+- Only chore members can **🙋 Take** a chore (owners and admins can too). For everyone else, private views don't show a Take button.
+- Anyone in the household can still mark a chore ✅ done, for example to help out. Points go to whoever did it (`last_done_by`).
+- **When someone leaves the household**, they're removed from every chore's members. If a chore has no members left, it becomes unassigned and the owner is notified.
+- **When someone new joins**, they're added only to `everyone` chores. The owner adds them to `selected` chores with `/chore members`.
 
 ### Taking a chore yourself ("I'll do it")
 Any member can put their name on a chore **before** doing it, whatever the assignment style. This tells everyone "I've got this one" and keeps two people from doing the same chore.
@@ -194,10 +214,11 @@ chores                id, household_id, name, description, frequency_type, inter
                       last_done_at, next_due_at, overdue_since, skip_count,
                       story_points, skip_point_increase, max_points, bonus_points, bonus_reason,
                       assigned_to, taken_by, taken_at, last_done_by,
-                      assignment_style (nullable override),
+                      assignment_style (fixed|rotation|claim|random|balanced; starts as household default),
                       overdue_behavior (nullable override), rotate_by (occurrence|day),
-                      active, created_at
-chore_rotation        chore_id, user_id, position
+                      member_pool (everyone|selected), active, created_at
+chore_members         chore_id, user_id, position   -- used when member_pool = selected;
+                                                     -- position = rotation order
 take_requests         id, chore_id, requested_by, current_assignee, due_at,
                       status (pending|accepted|declined|expired), created_at
 chore_events          id, chore_id, household_id, type (done|skip|reassign|take|release|points_change),
@@ -225,7 +246,8 @@ board_messages        household_id, channel_id, message_id   -- so the board can
 - `/household settings` (owner): timezone, privacy mode, channel, default assignment style, overdue behavior (skip or roll forward), self-assignment policy, who can change points
 
 ### Chores
-- `/chore add`: opens a form (modal) for name, description and points, then select menus for frequency and assignment
+- `/chore add`: opens a form (modal) for name, description and points, then select menus for frequency, assignment style (pre-filled with the household default) and chore members
+- `/chore members`: choose who a chore can go to (everyone, or selected people) and set the rotation order
 - `/chore edit` · `/chore remove` · `/chore view` · `/chore assign` · `/chore skip`
 - `/chore points`: change a chore's points, either **permanently** (base points, skip increase, cap) or **this time only** (a one-time adjustment with an optional reason). Allowed by the household's points policy
 - `/chore take` · `/chore release`: put your name on a chore before doing it, or give it back
@@ -326,7 +348,7 @@ DiscordChoreChartBot/
 | **2. Households** | Create, invite, members, settings, privacy channel | Two households on one server can't see each other's data |
 | **3. Chores** | CRUD, frequency, multiple-times-per-day slots, next-due calculation | Unit tests cover every frequency type, both schedule modes, slots, and both overdue behaviors |
 | **4. Board + ✅** | Board message, done, skip, take/release, event history | Clicking ✅ or 🙋 updates the chore and the board |
-| **5. Assignment styles** | Fixed, rotation, claim, random, balanced | Tests for each style; owner can set default and override |
+| **5. Assignment styles** | Fixed, rotation, claim, random, balanced; per-chore members and rotation order | Tests for each style and member pool; household default applies to new chores |
 | **6. Discord reminders** | Scheduler, reminder rules, channel and DM delivery | Reminders arrive at the right local time |
 | **7. Leaderboard + summaries** | `/leaderboard`, `/summary now`, scheduled summaries | Weekly summary posts automatically |
 | **8. Email** | Contact verification, email provider | Verified email reminders with unsubscribe |
