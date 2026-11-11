@@ -53,7 +53,7 @@ A Discord bot that runs chore charts for households. It starts with one househol
 | Last done date | `last_done_at` | timestamp |
 | Next expected date | `next_due_at` | calculated |
 | Skip count | `skip_count` | resets to 0 when the chore is done |
-| Story points | `story_points` | integer (e.g. 1, 2, 3, 5, 8) |
+| Story points | `story_points` | base size, integer (e.g. 1, 2, 3, 5, 8); can grow when skipped (see "Story points" below) |
 | Assigned to | `assigned_to` | Discord user ID; empty means unassigned or open to claim |
 | Last done by | `last_done_by` | Discord user ID |
 
@@ -90,7 +90,7 @@ How it behaves:
 ### State changes
 | Action | Effect |
 |---|---|
-| **Done (✅)** | `last_done_at = now`, `last_done_by = user`, `skip_count = 0`, recalculate `next_due_at`, advance the assignee (depends on assignment style), record a `done` event with points |
+| **Done (✅)** | `last_done_at = now`, `last_done_by = user`, `skip_count = 0`, recalculate `next_due_at`, advance the assignee (depends on assignment style), record a `done` event with the **current** points (including any skip growth) |
 | **Skip** (assignee, owner or admin only) | `skip_count += 1`, move `next_due_at` to the next occurrence, advance the assignee if rotating, record a `skip` event |
 | **Overdue** | Depends on the household's overdue behavior (below) |
 | **Reassign** | Change `assigned_to`, record a `reassign` event |
@@ -111,6 +111,30 @@ Details:
 - Summaries and the leaderboard can show late completions separately from skips. Lateness = completion time minus the event's `due_at`.
 - Default for new households: `roll_forward`, which is less punishing. The owner can change it.
 - **Per-chore override:** the owner can set a chore's own `overdue_behavior`, different from the household's. When a multiple-times-per-day chore is created, the suggested default is `skip`, since making up a missed dog feeding later usually doesn't make sense.
+
+### Story points: changing them, and growth when skipped
+Every chore has its **own** point settings. Nothing here is household-wide except the permission setting.
+
+- **Base points** (`story_points`): the chore's normal size. It can be changed at any time with `/chore points` or `/chore edit`.
+- **Skip growth** (optional, per chore): a chore that keeps getting skipped gets bigger, because the job really is bigger by then (the bathroom gets dirtier).
+  - `skip_point_increase`: points added for each skip, e.g. **+1**. `0` means off.
+  - `max_points`: optional cap, e.g. never more than **13**.
+- **Current points** = base points + (skip count × skip increase), up to the cap. Nothing extra is stored: it's calculated from `skip_count`.
+- **When the chore is done**, the person who did it earns the **current** points (the bigger value), and the skip count resets to 0. So the chore goes back to its base size.
+- **Example:** "Clean bathroom" has base 3, +2 per skip, cap 9. Skipped twice → worth **7**. Done → Sam earns 7, and the chore is back to 3.
+- **The board shows the growth:** `Clean bathroom · 7 pts (3 + 4 from skips)`.
+- In `roll_forward` households, skips only happen when someone presses ⏭ Skip, so growth only happens then too.
+
+**Who can change points** (household owner setting, `points_edit_policy`). This covers base points, skip increase and the cap:
+
+| Setting | Who can change a chore's points |
+|---|---|
+| **`owner`** | Only the household owner |
+| **`admins`** (default) | The owner and admins |
+| **`assignee`** | The owner, admins, and the chore's current assignee |
+| **`members`** | Any member |
+
+Every change is recorded as a `points_change` event (who, old value, new value), shown in `/chore view`. That way nobody can quietly inflate a chore to climb the leaderboard.
 
 ---
 
@@ -157,21 +181,24 @@ Owners and admins can always take or reassign any chore.
 households            id, guild_id, name, owner_id, timezone, privacy_mode (channel|dm_only),
                       channel_id, role_id, default_assignment_style,
                       overdue_behavior (skip|roll_forward),
-                      self_assign_policy (ask|open|unassigned_only|off), created_at
+                      self_assign_policy (ask|open|unassigned_only|off),
+                      points_edit_policy (owner|admins|assignee|members), created_at
 household_members     household_id, user_id, role (owner|admin|member), joined_at
 household_invites     id, household_id, invited_user_id, invited_by, status, expires_at
 chores                id, household_id, name, description, frequency_type, interval, weekdays,
                       day_of_month, schedule_mode, times_per_day, due_times, min_gap_minutes,
                       last_done_at, next_due_at, overdue_since, skip_count,
-                      story_points, assigned_to, taken_by, taken_at, last_done_by,
+                      story_points, skip_point_increase, max_points,
+                      assigned_to, taken_by, taken_at, last_done_by,
                       assignment_style (nullable override),
                       overdue_behavior (nullable override), rotate_by (occurrence|day),
                       active, created_at
 chore_rotation        chore_id, user_id, position
 take_requests         id, chore_id, requested_by, current_assignee, due_at,
                       status (pending|accepted|declined|expired), created_at
-chore_events          id, chore_id, household_id, type (done|skip|reassign|take|release), user_id,
-                      points, due_at (the occurrence or slot this event is for),
+chore_events          id, chore_id, household_id, type (done|skip|reassign|take|release|points_change),
+                      user_id, points, due_at (the occurrence or slot this event is for),
+                      details (e.g. old and new point values),
                       auto (true if made by the overdue job), undone_at, created_at
 contact_methods       id, user_id, type (email|sms|push), value_encrypted, verified_at
 reminder_rules        id, user_id, household_id, channel (discord_channel|discord_dm|sms|email|push),
@@ -191,11 +218,12 @@ board_messages        household_id, channel_id, message_id   -- so the board can
 - `/household create <name>`: creates the household; optionally creates a private role and channel
 - `/household invite @user`: the invited user accepts with a button
 - `/household members` · `/household leave` · `/household switch`
-- `/household settings` (owner): timezone, privacy mode, channel, default assignment style, overdue behavior (skip or roll forward), self-assignment policy
+- `/household settings` (owner): timezone, privacy mode, channel, default assignment style, overdue behavior (skip or roll forward), self-assignment policy, who can change points
 
 ### Chores
 - `/chore add`: opens a form (modal) for name, description and points, then select menus for frequency and assignment
 - `/chore edit` · `/chore remove` · `/chore view` · `/chore assign` · `/chore skip`
+- `/chore points`: change a chore's base points, skip increase and cap (allowed by the household's points policy)
 - `/chore take` · `/chore release`: put your name on a chore before doing it, or give it back
 - `/chores`: the household's chore list (ephemeral)
 - `/mychores`: the user's assigned and taken chores (ephemeral)
@@ -213,6 +241,7 @@ board_messages        household_id, channel_id, message_id   -- so the board can
 - **Only the assignee can skip** (owners and admins too). If anyone else clicks ⏭ Skip, they privately see "Only Sam can skip this." with a **🙋 Ask to take it** button, which follows the self-assignment policy.
 - If the person who *took* a chore clicks ⏭ Skip, they privately choose **Release it** (give it back) or **Skip this time**.
 - Taken chores show "🙋 Sam has this".
+- Points are shown on each chore, including skip growth: `7 pts (3 + 4 from skips)`.
 - **Private views** (`/mychores`, `/chores`, DM reminders) are built for one person, so they follow the rule exactly: the assignee sees ✅ + ⏭ Skip, and everyone else sees ✅ + 🙋 Take it.
 - The ✅ button also appears in DM, channel and email reminders (as a link) wherever possible.
 - **Discord limit:** a message can hold at most 25 buttons (5 rows of 5). With 2 buttons per chore that's 10 chores per message (2 chores per row), so bigger households get the board split across several messages.
