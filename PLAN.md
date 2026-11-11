@@ -1,0 +1,235 @@
+# Chore Chart Discord Bot: Project Plan
+
+A Discord bot that runs chore charts for households. It starts with one household, then becomes a public bot that many households can use, including several private households on the same Discord server.
+
+---
+
+## 1. Tech stack
+
+| Area | Choice | Why |
+|---|---|---|
+| Language | TypeScript (Node.js LTS) | Type safety; the best-supported Discord library |
+| Discord library | discord.js v14 | Slash commands, buttons, modals, select menus |
+| Database | PostgreSQL (managed: Neon or Supabase) | Cloud-hosted, with backups; data is relational |
+| ORM | Drizzle ORM + drizzle-kit migrations | Type-safe queries; schema kept in code |
+| Job scheduler | pg-boss (job queue stored in Postgres) | Reminders, summaries and auto-skip with no extra service |
+| Dates and timezones | Luxon | Each household has its own timezone |
+| Validation | Zod | Checks command input and environment settings |
+| Email | Resend or Amazon SES | Reminder and summary emails |
+| SMS | Twilio | Text reminders |
+| Push | ntfy first, then web push (PWA) later | See section 7 |
+| Logging | pino | Structured logs |
+| Tests | Vitest | Mostly for scheduling and assignment logic |
+| Hosting | Railway or Fly.io (always-on) | The bot must stay connected to send scheduled reminders |
+
+---
+
+## 2. Core concepts
+
+- **Discord server (guild):** can hold **many households**.
+- **Household:** the unit that owns chores. It has an owner, members and settings. All data is separated by `household_id`.
+- **Member:** a Discord user in a household, with the role `owner`, `admin` or `member`. A user can belong to more than one household.
+- **Chore:** a recurring (or one-time) task that belongs to a household.
+- **Chore event:** a history row for each time a chore is done, skipped or reassigned. Points, the leaderboard and summaries are built from these rows.
+
+### Privacy between households
+- Every database query is filtered by `household_id`, and membership is checked **on the server**, not just in Discord.
+- Personal views (`/mychores`, settings, stats) use **ephemeral** replies, which only the user can see.
+- Each household can optionally get a **private role and channel** created by the bot, for shared posts (the board, leaderboard and summaries).
+- **DM-only mode** posts nothing in the server at all.
+- Tell users plainly that server Administrators can see every channel; only DMs and ephemeral replies are hidden from them.
+
+---
+
+## 3. Chore data model
+
+### Required fields (from the requirements)
+
+| Field | Column | Notes |
+|---|---|---|
+| Name | `name` | |
+| Description | `description` | optional |
+| Frequency | `frequency_type`, `interval`, `weekdays`, `day_of_month` | see below |
+| Last done date | `last_done_at` | timestamp |
+| Next expected date | `next_due_at` | calculated |
+| Skip count | `skip_count` | resets to 0 when the chore is done |
+| Story points | `story_points` | integer (e.g. 1, 2, 3, 5, 8) |
+| Assigned to | `assigned_to` | Discord user ID; empty means unassigned or open to claim |
+| Last done by | `last_done_by` | Discord user ID |
+
+### Frequency
+- `frequency_type`: `once` | `daily` | `every_n_days` | `weekly` | `monthly`
+- `interval`: e.g. every **2** weeks
+- `weekdays`: e.g. Mon/Wed/Fri (used with weekly)
+- `day_of_month`: e.g. the 1st (used with monthly)
+- `schedule_mode`:
+  - `fixed`: due on the calendar schedule whenever it was last done (e.g. "trash goes out every Tuesday")
+  - `after_done`: due a set time after the last completion (e.g. "clean the fridge 30 days after it was last cleaned")
+
+### State changes
+| Action | Effect |
+|---|---|
+| **Done (✅)** | `last_done_at = now`, `last_done_by = user`, `skip_count = 0`, recalculate `next_due_at`, advance the assignee (depends on assignment style), record a `done` event with points |
+| **Skip** | `skip_count += 1`, move `next_due_at` to the next occurrence, advance the assignee if rotating, record a `skip` event |
+| **Auto-skip** (household setting) | When a chore is overdue past its next occurrence, treat it as a Skip |
+| **Reassign** | Change `assigned_to`, record a `reassign` event |
+
+---
+
+## 4. Assignment styles
+
+The household owner sets a **default style** for the household. Optionally, the owner can **override it per chore**.
+
+| Style | How it works |
+|---|---|
+| **Fixed** | The owner picks the assignee, and it stays with that person |
+| **Rotation** | Moves through an ordered member list after each done or skip |
+| **Claim** | The chore is unassigned; any member clicks **Claim** to take it |
+| **Random** | A random member is picked each new cycle |
+| **Balanced** | Goes to the member with the fewest story points this period |
+
+Rule: anyone in the household can mark a chore done. Points go to whoever did it (`last_done_by`).
+
+---
+
+## 5. Database tables
+
+```
+households            id, guild_id, name, owner_id, timezone, privacy_mode (channel|dm_only),
+                      channel_id, role_id, default_assignment_style, auto_skip, created_at
+household_members     household_id, user_id, role (owner|admin|member), joined_at
+household_invites     id, household_id, invited_user_id, invited_by, status, expires_at
+chores                id, household_id, name, description, frequency_type, interval, weekdays,
+                      day_of_month, schedule_mode, last_done_at, next_due_at, skip_count,
+                      story_points, assigned_to, last_done_by, assignment_style (nullable override),
+                      active, created_at
+chore_rotation        chore_id, user_id, position
+chore_events          id, chore_id, household_id, type (done|skip|reassign|claim), user_id,
+                      points, created_at
+contact_methods       id, user_id, type (email|sms|push), value_encrypted, verified_at
+reminder_rules        id, user_id, household_id, channel (discord_channel|discord_dm|sms|email|push),
+                      trigger (before_due|at_due|overdue|daily_digest), offset_minutes,
+                      time_of_day, enabled
+user_settings         user_id, quiet_hours_start, quiet_hours_end, active_household_id
+summary_schedules     household_id, cadence (daily|weekly|monthly|off), day_of_week,
+                      day_of_month, time_of_day, destination (channel|dm)
+board_messages        household_id, channel_id, message_id   -- so the board can be edited in place
+```
+
+---
+
+## 6. Discord commands and interactions
+
+### Households
+- `/household create <name>`: creates the household; optionally creates a private role and channel
+- `/household invite @user`: the invited user accepts with a button
+- `/household members` · `/household leave` · `/household switch`
+- `/household settings` (owner): timezone, privacy mode, channel, default assignment style, auto-skip
+
+### Chores
+- `/chore add`: opens a form (modal) for name, description and points, then select menus for frequency and assignment
+- `/chore edit` · `/chore remove` · `/chore view` · `/chore assign` · `/chore skip`
+- `/chores`: the household's chore list (ephemeral)
+- `/mychores`: only the user's assigned chores (ephemeral)
+
+### The board (marking chores done)
+- `/board`: posts the household's chore chart in its channel, grouped as **Overdue / Due today / Upcoming**
+- Each chore has a **✅ button**. One click marks it done, and the board updates itself.
+- Claim-style chores show a **Claim** button. A ⏭ Skip button appears as well.
+- The ✅ button also appears in DM, channel and email reminders (as a link) wherever possible.
+- **Discord limit:** a message can hold at most 25 buttons. Larger households get a paged board or a "Mark done" select menu.
+
+### Leaderboard and summary
+- `/leaderboard [week|month|all]`: posted **in the household channel**; ranks members by story points
+- `/summary now`: runs a summary immediately
+- `/summary schedule` (owner): sets the cadence, day, time and destination
+- Summary contents: chores completed, overdue, skipped (with skip counts), and points per member
+
+### Reminders (each user sets their own)
+- `/reminders`: a settings menu to add, remove or toggle rules (channel + trigger + timing)
+- `/contact add email|phone|push`: sends a verification code, which the user confirms with `/contact verify`
+- `/reminders quiet-hours`
+
+---
+
+## 7. Notifications
+
+There is one **dispatcher** with a separate **provider** for each channel. Reminder jobs call `notify(user, message)`, and the dispatcher sends it through every channel the user has enabled.
+
+| Channel | Provider | Notes |
+|---|---|---|
+| Discord channel | discord.js | @mentions the user in the household channel |
+| Discord DM | discord.js | Fails if the user blocks DMs; fall back to the channel |
+| Email | Resend / SES | Needs your own verified domain; include an unsubscribe link |
+| SMS | Twilio | Costs money per message. US numbers need **A2P 10DLC registration**. Must support STOP/opt-out |
+| Push | **ntfy** first (user installs the ntfy app and subscribes to a private topic) | Later: a web push PWA dashboard. Note that Discord DMs already arrive as phone push notifications |
+
+**Contact info is personal data:** verify it before use, encrypt it at rest, delete it when a user leaves or asks, and never show it to other members.
+
+### Scheduled jobs (pg-boss)
+- **Reminder sweep** (every minute): finds rules that are due and sends them, respecting quiet hours and the household timezone
+- **Auto-skip sweep** (every hour): applies auto-skip to chores that are overdue past their next occurrence
+- **Summary jobs:** run on each household's chosen schedule
+- **Board refresh:** updates board messages when chores change
+
+---
+
+## 8. Project structure
+
+```
+DiscordChoreChartBot/
+  src/
+    index.ts                 starts the bot and the job worker
+    config.ts                environment variables (checked with Zod)
+    bot/
+      commands/              one file per slash command group
+      interactions/          button, select-menu and modal handlers
+      views/                 builds the board, leaderboard and summary messages
+      deploy-commands.ts     registers slash commands with Discord
+    domain/                  pure logic, no Discord code (easy to test)
+      schedule.ts            frequency → next_due_at
+      assignment.ts          the 5 assignment styles
+      chores.ts              done / skip / reassign
+      households.ts          membership and permissions
+      points.ts              leaderboard and summary totals
+    db/
+      schema.ts              Drizzle schema
+      client.ts
+      migrations/
+    jobs/                    reminders, auto-skip, summaries
+    notify/                  dispatcher + discord, dm, email, sms and push providers
+    lib/                     time, crypto, logging
+  tests/
+  drizzle.config.ts
+  .env.example
+  package.json
+```
+
+---
+
+## 9. Build phases
+
+| Phase | Goal | Done when |
+|---|---|---|
+| **1. Foundation** | Project setup, Discord app, Postgres on Neon, deploy to Railway or Fly | A `/ping` command works from the cloud |
+| **2. Households** | Create, invite, members, settings, privacy channel | Two households on one server can't see each other's data |
+| **3. Chores** | CRUD, frequency, next-due calculation | Unit tests cover every frequency type and both schedule modes |
+| **4. Board + ✅** | Board message, done, skip, claim, event history | Clicking ✅ updates the chore and the board |
+| **5. Assignment styles** | Fixed, rotation, claim, random, balanced | Tests for each style; owner can set default and override |
+| **6. Discord reminders** | Scheduler, reminder rules, channel and DM delivery | Reminders arrive at the right local time |
+| **7. Leaderboard + summaries** | `/leaderboard`, `/summary now`, scheduled summaries | Weekly summary posts automatically |
+| **8. Email** | Contact verification, email provider | Verified email reminders with unsubscribe |
+| **9. SMS + push** | Twilio (after 10DLC registration), ntfy | Texts and push notifications arrive |
+| **10. Public launch** | Privacy policy, terms, data deletion, rate limits, Discord bot verification | Ready for other households to add it |
+
+Phases 1–7 make a complete, usable bot for your own household. Phases 8–10 prepare it for other households.
+
+---
+
+## 10. Open questions
+
+1. **Points:** should skipping a chore cost points, or only cost the points you would have earned?
+2. **Auto-skip:** on or off by default?
+3. **Who can mark done:** anyone in the household, or only the assignee and admins?
+4. **Push notifications:** is ntfy acceptable to start, or is a custom phone app or PWA a requirement?
+5. **Cost:** SMS has real per-message costs. Should it be a paid or premium feature once the bot is public?
