@@ -49,7 +49,7 @@ A Discord bot that runs chore charts for households. It starts with one househol
 |---|---|---|
 | Name | `name` | |
 | Description | `description` | optional |
-| Frequency | `frequency_type`, `interval`, `weekdays`, `day_of_month` | see below |
+| Frequency | `frequency_type`, `interval`, `weekdays`, `day_of_month`, `times_per_day`, `due_times` | see below |
 | Last done date | `last_done_at` | timestamp |
 | Next expected date | `next_due_at` | calculated |
 | Skip count | `skip_count` | resets to 0 when the chore is done |
@@ -66,6 +66,27 @@ A Discord bot that runs chore charts for households. It starts with one househol
   - `fixed`: due on the calendar schedule whenever it was last done (e.g. "trash goes out every Tuesday")
   - `after_done`: due a set time after the last completion (e.g. "clean the fridge 30 days after it was last cleaned")
 
+### Chores done multiple times per day
+Some chores happen more than once a day: "feed the dog" twice, "wipe the counters" after every meal. Each due time in a day is a **slot**.
+
+New chore fields:
+- `times_per_day`: how many times per day (default **1**). It works with any frequency, e.g. "twice a day, Mon/Wed/Fri".
+- `due_times`: optional list of times of day, one per slot, e.g. `08:00, 18:00`.
+  - **With times:** each slot is due at its own time.
+  - **Without times:** the slots are just a count ("3 times today"), all due by the end of the day.
+- `min_gap_minutes`: optional minimum time between completions. This stops a double-click, or two people at once, from filling both "feed the dog" slots for one feeding.
+
+How it behaves:
+- **✅ Done** fills the **oldest open slot**. Each completion earns the chore's story points, so a twice-a-day 1-point chore is worth 2 points a day.
+- `next_due_at` is the next open slot, which may be later today. `last_done_at` and `last_done_by` refer to the most recent completion.
+- **The board** shows progress: `Feed the dog · 1 of 2 today · next 6:00 PM ✅`.
+- **Reminders** are sent for each slot.
+- **↩ Undo:** a completion can be undone for a few minutes after it's made, in case of mistakes.
+- **Missed slots** follow the overdue behavior (below):
+  - `skip`: a slot that's still open when the next slot starts (or at the end of the day, for the last slot) is auto-skipped.
+  - `roll_forward`: missed slots stay open as overdue, and the next ✅ fills the oldest one first (recorded as late).
+- **Rotation** can advance after each slot (morning person and evening person) or once per day. The owner picks with `rotate_by` (`occurrence` | `day`).
+
 ### State changes
 | Action | Effect |
 |---|---|
@@ -80,14 +101,15 @@ This answers the question "if a chore gets done a day late, is that a **delay** 
 | Setting | What happens when a chore isn't done by its due date | Done a day late counts as |
 |---|---|---|
 | **`skip`**: skip to the next scheduled date | The chore is automatically skipped: `skip_count += 1`, `next_due_at` moves to the next scheduled occurrence, the assignee advances if rotating, and a `skip` event is recorded | A completion of the *next* occurrence. The missed one stays counted as a skip |
-| **`roll_forward`**: move forward one day | The chore stays on the board as overdue. Each day it isn't done, `next_due_at` moves forward by one day. `skip_count` is **not** increased | A **delay**: a `done` event with `days_late = 1`. No skip is recorded |
+| **`roll_forward`**: move forward one day | The chore stays on the board as overdue. Each day it isn't done, `next_due_at` moves forward by one day. `skip_count` is **not** increased | A **delay**: a `done` event that is 1 day late (its `due_at` is the original due date). No skip is recorded |
 
 Details:
 - `overdue_since` is set to the original due date when a chore first becomes overdue, so the board can show "Overdue 3 days" even as `next_due_at` keeps moving. It is cleared when the chore is done.
 - After a late completion, the next due date is calculated as usual: from the calendar for `fixed` chores, or from the completion date for `after_done` chores.
 - With `roll_forward`, a chore only gets skipped when someone presses ⏭ Skip.
-- Summaries and the leaderboard can show late completions (`days_late`) separately from skips.
+- Summaries and the leaderboard can show late completions separately from skips. Lateness = completion time minus the event's `due_at`.
 - Default for new households: `roll_forward`, which is less punishing. The owner can change it.
+- **Per-chore override:** the owner can set a chore's own `overdue_behavior`, different from the household's. When a multiple-times-per-day chore is created, the suggested default is `skip`, since making up a missed dog feeding later usually doesn't make sense.
 
 ---
 
@@ -116,12 +138,15 @@ households            id, guild_id, name, owner_id, timezone, privacy_mode (chan
 household_members     household_id, user_id, role (owner|admin|member), joined_at
 household_invites     id, household_id, invited_user_id, invited_by, status, expires_at
 chores                id, household_id, name, description, frequency_type, interval, weekdays,
-                      day_of_month, schedule_mode, last_done_at, next_due_at, overdue_since, skip_count,
+                      day_of_month, schedule_mode, times_per_day, due_times, min_gap_minutes,
+                      last_done_at, next_due_at, overdue_since, skip_count,
                       story_points, assigned_to, last_done_by, assignment_style (nullable override),
+                      overdue_behavior (nullable override), rotate_by (occurrence|day),
                       active, created_at
 chore_rotation        chore_id, user_id, position
 chore_events          id, chore_id, household_id, type (done|skip|reassign|claim), user_id,
-                      points, days_late, auto (true if done by the overdue job), created_at
+                      points, due_at (the occurrence or slot this event is for),
+                      auto (true if made by the overdue job), undone_at, created_at
 contact_methods       id, user_id, type (email|sms|push), value_encrypted, verified_at
 reminder_rules        id, user_id, household_id, channel (discord_channel|discord_dm|sms|email|push),
                       trigger (before_due|at_due|overdue|daily_digest), offset_minutes,
@@ -184,7 +209,7 @@ There is one **dispatcher** with a separate **provider** for each channel. Remin
 
 ### Scheduled jobs (pg-boss)
 - **Reminder sweep** (every minute): finds rules that are due and sends them, respecting quiet hours and the household timezone
-- **Overdue sweep** (every hour, in each household's timezone): for `skip` households, auto-skips chores that are past due; for `roll_forward` households, sets `overdue_since` and moves `next_due_at` forward one day
+- **Overdue sweep** (every 5 minutes, so slot times are handled promptly, in each household's timezone): with `skip`, auto-skips chores and slots that are past due; with `roll_forward`, sets `overdue_since`, keeps missed slots open, and moves `next_due_at` forward one day for daily-or-less chores
 - **Summary jobs:** run on each household's chosen schedule
 - **Board refresh:** updates board messages when chores change
 
@@ -229,7 +254,7 @@ DiscordChoreChartBot/
 |---|---|---|
 | **1. Foundation** | Project setup, Discord app, Postgres on Neon, deploy to Railway or Fly | A `/ping` command works from the cloud |
 | **2. Households** | Create, invite, members, settings, privacy channel | Two households on one server can't see each other's data |
-| **3. Chores** | CRUD, frequency, next-due calculation | Unit tests cover every frequency type and both schedule modes |
+| **3. Chores** | CRUD, frequency, multiple-times-per-day slots, next-due calculation | Unit tests cover every frequency type, both schedule modes, slots, and both overdue behaviors |
 | **4. Board + ✅** | Board message, done, skip, claim, event history | Clicking ✅ updates the chore and the board |
 | **5. Assignment styles** | Fixed, rotation, claim, random, balanced | Tests for each style; owner can set default and override |
 | **6. Discord reminders** | Scheduler, reminder rules, channel and DM delivery | Reminders arrive at the right local time |
