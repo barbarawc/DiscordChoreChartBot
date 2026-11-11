@@ -12,7 +12,7 @@ A Discord bot that runs chore charts for households. It starts with one househol
 | Discord library | discord.js v14 | Slash commands, buttons, modals, select menus |
 | Database | PostgreSQL (managed: Neon or Supabase) | Cloud-hosted, with backups; data is relational |
 | ORM | Drizzle ORM + drizzle-kit migrations | Type-safe queries; schema kept in code |
-| Job scheduler | pg-boss (job queue stored in Postgres) | Reminders, summaries and auto-skip with no extra service |
+| Job scheduler | pg-boss (job queue stored in Postgres) | Reminders, summaries and overdue handling with no extra service |
 | Dates and timezones | Luxon | Each household has its own timezone |
 | Validation | Zod | Checks command input and environment settings |
 | Email | Resend or Amazon SES | Reminder and summary emails |
@@ -71,8 +71,23 @@ A Discord bot that runs chore charts for households. It starts with one househol
 |---|---|
 | **Done (✅)** | `last_done_at = now`, `last_done_by = user`, `skip_count = 0`, recalculate `next_due_at`, advance the assignee (depends on assignment style), record a `done` event with points |
 | **Skip** | `skip_count += 1`, move `next_due_at` to the next occurrence, advance the assignee if rotating, record a `skip` event |
-| **Auto-skip** (household setting) | When a chore is overdue past its next occurrence, treat it as a Skip |
+| **Overdue** | Depends on the household's overdue behavior (below) |
 | **Reassign** | Change `assigned_to`, record a `reassign` event |
+
+### Overdue behavior (household owner setting)
+This answers the question "if a chore gets done a day late, is that a **delay** or a **skip**?" The owner chooses one of two behaviors:
+
+| Setting | What happens when a chore isn't done by its due date | Done a day late counts as |
+|---|---|---|
+| **`skip`**: skip to the next scheduled date | The chore is automatically skipped: `skip_count += 1`, `next_due_at` moves to the next scheduled occurrence, the assignee advances if rotating, and a `skip` event is recorded | A completion of the *next* occurrence. The missed one stays counted as a skip |
+| **`roll_forward`**: move forward one day | The chore stays on the board as overdue. Each day it isn't done, `next_due_at` moves forward by one day. `skip_count` is **not** increased | A **delay**: a `done` event with `days_late = 1`. No skip is recorded |
+
+Details:
+- `overdue_since` is set to the original due date when a chore first becomes overdue, so the board can show "Overdue 3 days" even as `next_due_at` keeps moving. It is cleared when the chore is done.
+- After a late completion, the next due date is calculated as usual: from the calendar for `fixed` chores, or from the completion date for `after_done` chores.
+- With `roll_forward`, a chore only gets skipped when someone presses ⏭ Skip.
+- Summaries and the leaderboard can show late completions (`days_late`) separately from skips.
+- Default for new households: `roll_forward`, which is less punishing. The owner can change it.
 
 ---
 
@@ -96,16 +111,17 @@ Rule: anyone in the household can mark a chore done. Points go to whoever did it
 
 ```
 households            id, guild_id, name, owner_id, timezone, privacy_mode (channel|dm_only),
-                      channel_id, role_id, default_assignment_style, auto_skip, created_at
+                      channel_id, role_id, default_assignment_style,
+                      overdue_behavior (skip|roll_forward), created_at
 household_members     household_id, user_id, role (owner|admin|member), joined_at
 household_invites     id, household_id, invited_user_id, invited_by, status, expires_at
 chores                id, household_id, name, description, frequency_type, interval, weekdays,
-                      day_of_month, schedule_mode, last_done_at, next_due_at, skip_count,
+                      day_of_month, schedule_mode, last_done_at, next_due_at, overdue_since, skip_count,
                       story_points, assigned_to, last_done_by, assignment_style (nullable override),
                       active, created_at
 chore_rotation        chore_id, user_id, position
 chore_events          id, chore_id, household_id, type (done|skip|reassign|claim), user_id,
-                      points, created_at
+                      points, days_late, auto (true if done by the overdue job), created_at
 contact_methods       id, user_id, type (email|sms|push), value_encrypted, verified_at
 reminder_rules        id, user_id, household_id, channel (discord_channel|discord_dm|sms|email|push),
                       trigger (before_due|at_due|overdue|daily_digest), offset_minutes,
@@ -124,7 +140,7 @@ board_messages        household_id, channel_id, message_id   -- so the board can
 - `/household create <name>`: creates the household; optionally creates a private role and channel
 - `/household invite @user`: the invited user accepts with a button
 - `/household members` · `/household leave` · `/household switch`
-- `/household settings` (owner): timezone, privacy mode, channel, default assignment style, auto-skip
+- `/household settings` (owner): timezone, privacy mode, channel, default assignment style, overdue behavior (skip or roll forward)
 
 ### Chores
 - `/chore add`: opens a form (modal) for name, description and points, then select menus for frequency and assignment
@@ -143,7 +159,7 @@ board_messages        household_id, channel_id, message_id   -- so the board can
 - `/leaderboard [week|month|all]`: posted **in the household channel**; ranks members by story points
 - `/summary now`: runs a summary immediately
 - `/summary schedule` (owner): sets the cadence, day, time and destination
-- Summary contents: chores completed, overdue, skipped (with skip counts), and points per member
+- Summary contents: chores completed (on time and late, with days late), overdue, skipped (with skip counts), and points per member
 
 ### Reminders (each user sets their own)
 - `/reminders`: a settings menu to add, remove or toggle rules (channel + trigger + timing)
@@ -168,7 +184,7 @@ There is one **dispatcher** with a separate **provider** for each channel. Remin
 
 ### Scheduled jobs (pg-boss)
 - **Reminder sweep** (every minute): finds rules that are due and sends them, respecting quiet hours and the household timezone
-- **Auto-skip sweep** (every hour): applies auto-skip to chores that are overdue past their next occurrence
+- **Overdue sweep** (every hour, in each household's timezone): for `skip` households, auto-skips chores that are past due; for `roll_forward` households, sets `overdue_since` and moves `next_due_at` forward one day
 - **Summary jobs:** run on each household's chosen schedule
 - **Board refresh:** updates board messages when chores change
 
@@ -196,7 +212,7 @@ DiscordChoreChartBot/
       schema.ts              Drizzle schema
       client.ts
       migrations/
-    jobs/                    reminders, auto-skip, summaries
+    jobs/                    reminders, overdue sweep, summaries
     notify/                  dispatcher + discord, dm, email, sms and push providers
     lib/                     time, crypto, logging
   tests/
@@ -229,7 +245,6 @@ Phases 1–7 make a complete, usable bot for your own household. Phases 8–10 p
 ## 10. Open questions
 
 1. **Points:** should skipping a chore cost points, or only cost the points you would have earned?
-2. **Auto-skip:** on or off by default?
-3. **Who can mark done:** anyone in the household, or only the assignee and admins?
-4. **Push notifications:** is ntfy acceptable to start, or is a custom phone app or PWA a requirement?
-5. **Cost:** SMS has real per-message costs. Should it be a paid or premium feature once the bot is public?
+2. **Who can mark done:** anyone in the household, or only the assignee and admins?
+3. **Push notifications:** is ntfy acceptable to start, or is a custom phone app or PWA a requirement?
+4. **Cost:** SMS has real per-message costs. Should it be a paid or premium feature once the bot is public?
