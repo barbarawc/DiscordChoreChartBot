@@ -91,7 +91,7 @@ How it behaves:
 | Action | Effect |
 |---|---|
 | **Done (✅)** | `last_done_at = now`, `last_done_by = user`, `skip_count = 0`, recalculate `next_due_at`, advance the assignee (depends on assignment style), record a `done` event with points |
-| **Skip** | `skip_count += 1`, move `next_due_at` to the next occurrence, advance the assignee if rotating, record a `skip` event |
+| **Skip** (assignee, owner or admin only) | `skip_count += 1`, move `next_due_at` to the next occurrence, advance the assignee if rotating, record a `skip` event |
 | **Overdue** | Depends on the household's overdue behavior (below) |
 | **Reassign** | Change `assigned_to`, record a `reassign` event |
 | **Take / Release** | Set or clear `taken_by` for the current occurrence, record a `take` or `release` event (see section 4) |
@@ -131,7 +131,7 @@ Rule: anyone in the household can mark a chore done. Points go to whoever did it
 ### Taking a chore yourself ("I'll do it")
 Any member can put their name on a chore **before** doing it, whatever the assignment style. This tells everyone "I've got this one" and keeps two people from doing the same chore.
 
-- **🙋 Take it** button on the board (and the `/chore take` command) assigns the chore to you for the **current occurrence only**. For multiple-times-per-day chores, that means the next open slot.
+- **🙋 Take it** button (on unassigned chores on the board, in private views, or via "Ask to take it"), or the `/chore take` command, assigns the chore to you for the **current occurrence only**. For multiple-times-per-day chores, that means the next open slot.
 - **Release** (`/chore release`) gives it back if your plans change.
 - When the occurrence is done or skipped, the "taken" mark clears, and the chore's normal assignment style picks the next person. Rotation order and fixed assignees are not changed. To change the regular assignee permanently, the owner uses `/chore assign`.
 - If a taken chore goes overdue, it stays with the person who took it, and the overdue behavior applies as usual.
@@ -203,9 +203,19 @@ board_messages        household_id, channel_id, message_id   -- so the board can
 ### The board (marking chores done)
 - `/board`: posts the household's chore chart in its channel, grouped as **Overdue / Due today / Upcoming**
 - Each chore has a **✅ button**. One click marks it done, and the board updates itself.
-- Each chore also has **🙋 Take it** (or **Release**, if it's yours) and **⏭ Skip** buttons. Taken chores show "🙋 Sam has this".
+- **Exactly two buttons per chore.** The second button depends on the chore, because Discord shows the same buttons to everyone viewing a shared message:
+
+  | Chore state | Buttons on the shared board |
+  |---|---|
+  | Assigned (or taken) | **✅ Done** · **⏭ Skip** |
+  | Unassigned | **✅ Done** · **🙋 Take it** |
+
+- **Only the assignee can skip** (owners and admins too). If anyone else clicks ⏭ Skip, they privately see "Only Sam can skip this." with a **🙋 Ask to take it** button, which follows the self-assignment policy.
+- If the person who *took* a chore clicks ⏭ Skip, they privately choose **Release it** (give it back) or **Skip this time**.
+- Taken chores show "🙋 Sam has this".
+- **Private views** (`/mychores`, `/chores`, DM reminders) are built for one person, so they follow the rule exactly: the assignee sees ✅ + ⏭ Skip, and everyone else sees ✅ + 🙋 Take it.
 - The ✅ button also appears in DM, channel and email reminders (as a link) wherever possible.
-- **Discord limit:** a message can hold at most 25 buttons (5 rows of 5). With 3 buttons per chore that's about 8 chores per message, so the board is split across several messages or pages. A compact mode shows only ✅ per chore, with a "More actions" menu for Take and Skip.
+- **Discord limit:** a message can hold at most 25 buttons (5 rows of 5). With 2 buttons per chore that's 10 chores per message (2 chores per row), so bigger households get the board split across several messages.
 
 ### Leaderboard and summary
 - `/leaderboard [week|month|all]`: posted **in the household channel**; ranks members by story points
