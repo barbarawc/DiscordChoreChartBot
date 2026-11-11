@@ -90,7 +90,7 @@ How it behaves:
 ### State changes
 | Action | Effect |
 |---|---|
-| **Done (✅)** | `last_done_at = now`, `last_done_by = user`, `skip_count = 0`, recalculate `next_due_at`, advance the assignee (depends on assignment style), record a `done` event with the **current** points (including any skip growth) |
+| **Done (✅)** | `last_done_at = now`, `last_done_by = user`, `skip_count = 0`, recalculate `next_due_at`, advance the assignee (depends on assignment style), record a `done` event with the **current** points (including skip growth and any one-time adjustment), then clear `bonus_points` |
 | **Skip** (assignee, owner or admin only) | `skip_count += 1`, move `next_due_at` to the next occurrence, advance the assignee if rotating, record a `skip` event |
 | **Overdue** | Depends on the household's overdue behavior (below) |
 | **Reassign** | Change `assigned_to`, record a `reassign` event |
@@ -119,13 +119,17 @@ Every chore has its **own** point settings. Nothing here is household-wide excep
 - **Skip growth** (optional, per chore): a chore that keeps getting skipped gets bigger, because the job really is bigger by then (the bathroom gets dirtier).
   - `skip_point_increase`: points added for each skip, e.g. **+1**. `0` means off.
   - `max_points`: optional cap, e.g. never more than **13**.
-- **Current points** = base points + (skip count × skip increase), up to the cap. Nothing extra is stored: it's calculated from `skip_count`.
-- **When the chore is done**, the person who did it earns the **current** points (the bigger value), and the skip count resets to 0. So the chore goes back to its base size.
-- **Example:** "Clean bathroom" has base 3, +2 per skip, cap 9. Skipped twice → worth **7**. Done → Sam earns 7, and the chore is back to 3.
-- **The board shows the growth:** `Clean bathroom · 7 pts (3 + 4 from skips)`.
+- **One-time adjustment** (`bonus_points`, with an optional `bonus_reason`): change the points for **this time only**, when a chore is bigger (or smaller) than usual. Example: after a party, the bathroom is worth +4 more, with the reason "after the party".
+  - It can raise or lower the points, but the total never goes below 0.
+  - The skip growth cap does not limit it, since someone chose this value on purpose.
+  - It clears automatically when the chore is done.
+- **Current points** = base points + skip growth (up to the cap) + one-time adjustment. Skip growth is calculated from `skip_count`, so it isn't stored separately.
+- **When the chore is done**, the person who did it earns the **current** points. Then the skip count and the one-time adjustment reset, so the chore goes back to its base size.
+- **Example:** "Clean bathroom" has base 3, +2 per skip, cap 9. Skipped twice → worth **7**. After a party the owner adds +4 → worth **11**. Sam does it, earns 11, and the chore is back to 3.
+- **The board shows the breakdown:** `Clean bathroom · 11 pts (3 + 4 from skips + 4 after the party)`.
 - In `roll_forward` households, skips only happen when someone presses ⏭ Skip, so growth only happens then too.
 
-**Who can change points** (household owner setting, `points_edit_policy`). This covers base points, skip increase and the cap:
+**Who can change points** (household owner setting, `points_edit_policy`). This covers base points, skip increase, the cap and one-time adjustments. The owner can always change them:
 
 | Setting | Who can change a chore's points |
 |---|---|
@@ -188,7 +192,7 @@ household_invites     id, household_id, invited_user_id, invited_by, status, exp
 chores                id, household_id, name, description, frequency_type, interval, weekdays,
                       day_of_month, schedule_mode, times_per_day, due_times, min_gap_minutes,
                       last_done_at, next_due_at, overdue_since, skip_count,
-                      story_points, skip_point_increase, max_points,
+                      story_points, skip_point_increase, max_points, bonus_points, bonus_reason,
                       assigned_to, taken_by, taken_at, last_done_by,
                       assignment_style (nullable override),
                       overdue_behavior (nullable override), rotate_by (occurrence|day),
@@ -223,7 +227,7 @@ board_messages        household_id, channel_id, message_id   -- so the board can
 ### Chores
 - `/chore add`: opens a form (modal) for name, description and points, then select menus for frequency and assignment
 - `/chore edit` · `/chore remove` · `/chore view` · `/chore assign` · `/chore skip`
-- `/chore points`: change a chore's base points, skip increase and cap (allowed by the household's points policy)
+- `/chore points`: change a chore's points, either **permanently** (base points, skip increase, cap) or **this time only** (a one-time adjustment with an optional reason). Allowed by the household's points policy
 - `/chore take` · `/chore release`: put your name on a chore before doing it, or give it back
 - `/chores`: the household's chore list (ephemeral)
 - `/mychores`: the user's assigned and taken chores (ephemeral)
@@ -241,7 +245,7 @@ board_messages        household_id, channel_id, message_id   -- so the board can
 - **Only the assignee can skip** (owners and admins too). If anyone else clicks ⏭ Skip, they privately see "Only Sam can skip this." with a **🙋 Ask to take it** button, which follows the self-assignment policy.
 - If the person who *took* a chore clicks ⏭ Skip, they privately choose **Release it** (give it back) or **Skip this time**.
 - Taken chores show "🙋 Sam has this".
-- Points are shown on each chore, including skip growth: `7 pts (3 + 4 from skips)`.
+- Points are shown on each chore, with the breakdown: `11 pts (3 + 4 from skips + 4 after the party)`.
 - **Private views** (`/mychores`, `/chores`, DM reminders) are built for one person, so they follow the rule exactly: the assignee sees ✅ + ⏭ Skip, and everyone else sees ✅ + 🙋 Take it.
 - The ✅ button also appears in DM, channel and email reminders (as a link) wherever possible.
 - **Discord limit:** a message can hold at most 25 buttons (5 rows of 5). With 2 buttons per chore that's 10 chores per message (2 chores per row), so bigger households get the board split across several messages.
