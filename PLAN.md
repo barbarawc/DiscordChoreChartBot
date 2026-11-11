@@ -94,6 +94,7 @@ How it behaves:
 | **Skip** | `skip_count += 1`, move `next_due_at` to the next occurrence, advance the assignee if rotating, record a `skip` event |
 | **Overdue** | Depends on the household's overdue behavior (below) |
 | **Reassign** | Change `assigned_to`, record a `reassign` event |
+| **Take / Release** | Set or clear `taken_by` for the current occurrence, record a `take` or `release` event (see section 4) |
 
 ### Overdue behavior (household owner setting)
 This answers the question "if a chore gets done a day late, is that a **delay** or a **skip**?" The owner chooses one of two behaviors:
@@ -121,11 +122,32 @@ The household owner sets a **default style** for the household. Optionally, the 
 |---|---|
 | **Fixed** | The owner picks the assignee, and it stays with that person |
 | **Rotation** | Moves through an ordered member list after each done or skip |
-| **Claim** | The chore is unassigned; any member clicks **Claim** to take it |
+| **Claim** | The chore has no regular assignee; any member clicks **🙋 Take it** to claim it |
 | **Random** | A random member is picked each new cycle |
 | **Balanced** | Goes to the member with the fewest story points this period |
 
 Rule: anyone in the household can mark a chore done. Points go to whoever did it (`last_done_by`).
+
+### Taking a chore yourself ("I'll do it")
+Any member can put their name on a chore **before** doing it, whatever the assignment style. This tells everyone "I've got this one" and keeps two people from doing the same chore.
+
+- **🙋 Take it** button on the board (and the `/chore take` command) assigns the chore to you for the **current occurrence only**. For multiple-times-per-day chores, that means the next open slot.
+- **Release** (`/chore release`) gives it back if your plans change.
+- When the occurrence is done or skipped, the "taken" mark clears, and the chore's normal assignment style picks the next person. Rotation order and fixed assignees are not changed. To change the regular assignee permanently, the owner uses `/chore assign`.
+- If a taken chore goes overdue, it stays with the person who took it, and the overdue behavior applies as usual.
+- Effective assignee = `taken_by` if set, otherwise `assigned_to`. Reminders go to the effective assignee.
+- The **Claim** assignment style is simply a chore with no regular assignee, where the only way to get assigned is to take it.
+
+**Self-assignment policy** (household owner setting, `self_assign_policy`):
+
+| Setting | Unassigned chores | Chores already assigned to someone else |
+|---|---|---|
+| **`ask`** (default) | Take it instantly | The current assignee gets an **Accept / Decline** button. If they don't answer before the chore is due, the request expires |
+| **`open`** | Take it instantly | Take it instantly; the previous assignee is notified |
+| **`unassigned_only`** | Take it instantly | Not allowed |
+| **`off`** | Not allowed | Not allowed |
+
+Owners and admins can always take or reassign any chore.
 
 ---
 
@@ -134,17 +156,21 @@ Rule: anyone in the household can mark a chore done. Points go to whoever did it
 ```
 households            id, guild_id, name, owner_id, timezone, privacy_mode (channel|dm_only),
                       channel_id, role_id, default_assignment_style,
-                      overdue_behavior (skip|roll_forward), created_at
+                      overdue_behavior (skip|roll_forward),
+                      self_assign_policy (ask|open|unassigned_only|off), created_at
 household_members     household_id, user_id, role (owner|admin|member), joined_at
 household_invites     id, household_id, invited_user_id, invited_by, status, expires_at
 chores                id, household_id, name, description, frequency_type, interval, weekdays,
                       day_of_month, schedule_mode, times_per_day, due_times, min_gap_minutes,
                       last_done_at, next_due_at, overdue_since, skip_count,
-                      story_points, assigned_to, last_done_by, assignment_style (nullable override),
+                      story_points, assigned_to, taken_by, taken_at, last_done_by,
+                      assignment_style (nullable override),
                       overdue_behavior (nullable override), rotate_by (occurrence|day),
                       active, created_at
 chore_rotation        chore_id, user_id, position
-chore_events          id, chore_id, household_id, type (done|skip|reassign|claim), user_id,
+take_requests         id, chore_id, requested_by, current_assignee, due_at,
+                      status (pending|accepted|declined|expired), created_at
+chore_events          id, chore_id, household_id, type (done|skip|reassign|take|release), user_id,
                       points, due_at (the occurrence or slot this event is for),
                       auto (true if made by the overdue job), undone_at, created_at
 contact_methods       id, user_id, type (email|sms|push), value_encrypted, verified_at
@@ -165,20 +191,21 @@ board_messages        household_id, channel_id, message_id   -- so the board can
 - `/household create <name>`: creates the household; optionally creates a private role and channel
 - `/household invite @user`: the invited user accepts with a button
 - `/household members` · `/household leave` · `/household switch`
-- `/household settings` (owner): timezone, privacy mode, channel, default assignment style, overdue behavior (skip or roll forward)
+- `/household settings` (owner): timezone, privacy mode, channel, default assignment style, overdue behavior (skip or roll forward), self-assignment policy
 
 ### Chores
 - `/chore add`: opens a form (modal) for name, description and points, then select menus for frequency and assignment
 - `/chore edit` · `/chore remove` · `/chore view` · `/chore assign` · `/chore skip`
+- `/chore take` · `/chore release`: put your name on a chore before doing it, or give it back
 - `/chores`: the household's chore list (ephemeral)
-- `/mychores`: only the user's assigned chores (ephemeral)
+- `/mychores`: the user's assigned and taken chores (ephemeral)
 
 ### The board (marking chores done)
 - `/board`: posts the household's chore chart in its channel, grouped as **Overdue / Due today / Upcoming**
 - Each chore has a **✅ button**. One click marks it done, and the board updates itself.
-- Claim-style chores show a **Claim** button. A ⏭ Skip button appears as well.
+- Each chore also has **🙋 Take it** (or **Release**, if it's yours) and **⏭ Skip** buttons. Taken chores show "🙋 Sam has this".
 - The ✅ button also appears in DM, channel and email reminders (as a link) wherever possible.
-- **Discord limit:** a message can hold at most 25 buttons. Larger households get a paged board or a "Mark done" select menu.
+- **Discord limit:** a message can hold at most 25 buttons (5 rows of 5). With 3 buttons per chore that's about 8 chores per message, so the board is split across several messages or pages. A compact mode shows only ✅ per chore, with a "More actions" menu for Take and Skip.
 
 ### Leaderboard and summary
 - `/leaderboard [week|month|all]`: posted **in the household channel**; ranks members by story points
@@ -255,7 +282,7 @@ DiscordChoreChartBot/
 | **1. Foundation** | Project setup, Discord app, Postgres on Neon, deploy to Railway or Fly | A `/ping` command works from the cloud |
 | **2. Households** | Create, invite, members, settings, privacy channel | Two households on one server can't see each other's data |
 | **3. Chores** | CRUD, frequency, multiple-times-per-day slots, next-due calculation | Unit tests cover every frequency type, both schedule modes, slots, and both overdue behaviors |
-| **4. Board + ✅** | Board message, done, skip, claim, event history | Clicking ✅ updates the chore and the board |
+| **4. Board + ✅** | Board message, done, skip, take/release, event history | Clicking ✅ or 🙋 updates the chore and the board |
 | **5. Assignment styles** | Fixed, rotation, claim, random, balanced | Tests for each style; owner can set default and override |
 | **6. Discord reminders** | Scheduler, reminder rules, channel and DM delivery | Reminders arrive at the right local time |
 | **7. Leaderboard + summaries** | `/leaderboard`, `/summary now`, scheduled summaries | Weekly summary posts automatically |
