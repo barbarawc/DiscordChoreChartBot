@@ -153,7 +153,7 @@ Every change is recorded as a `points_change` event (who, old value, new value),
 | **Rotation** | Moves through the chore's members, in order, after each done or skip |
 | **Claim** | No regular assignee; a chore member clicks **🙋 Take it** to claim it |
 | **Random** | A random chore member is picked each new cycle |
-| **Balanced** | Goes to the chore member with the fewest story points this period |
+| **Balanced** | Goes to the chore member with the fewest story points this period (or, when point goals are on, the one furthest below their goal) |
 
 ### Who each chore can go to (chore members)
 Each chore has its own list of **members**: the people it can be assigned to. This is what lets different chores rotate among different people.
@@ -206,7 +206,10 @@ households            id, guild_id, name, owner_id, timezone, privacy_mode (chan
                       channel_id, role_id, default_assignment_style,
                       overdue_behavior (skip|roll_forward),
                       self_assign_policy (ask|open|unassigned_only|off),
-                      points_edit_policy (owner|admins|assignee|members), created_at
+                      points_edit_policy (owner|admins|assignee|members),
+                      leaderboard_enabled, leaderboard_rank_by (points|goal_percent),
+                      goals_enabled, goal_period (week|month), created_at
+point_goals           household_id, user_id, goal_points, updated_by, updated_at
 household_members     household_id, user_id, role (owner|admin|member), joined_at
 household_invites     id, household_id, invited_user_id, invited_by, status, expires_at
 chores                id, household_id, name, description, frequency_type, interval, weekdays,
@@ -243,7 +246,7 @@ board_messages        household_id, channel_id, message_id   -- so the board can
 - `/household create <name>`: creates the household; optionally creates a private role and channel
 - `/household invite @user`: the invited user accepts with a button
 - `/household members` · `/household leave` · `/household switch`
-- `/household settings` (owner): timezone, privacy mode, channel, default assignment style, overdue behavior (skip or roll forward), self-assignment policy, who can change points
+- `/household settings` (owner): timezone, privacy mode, channel, default assignment style, overdue behavior (skip or roll forward), self-assignment policy, who can change points, leaderboard on/off and rank-by, point goals on/off and goal period
 
 ### Chores
 - `/chore add`: opens a form (modal) for name, description and points, then select menus for frequency, assignment style (pre-filled with the household default) and chore members
@@ -272,11 +275,31 @@ board_messages        household_id, channel_id, message_id   -- so the board can
 - The ✅ button also appears in DM, channel and email reminders (as a link) wherever possible.
 - **Discord limit:** a message can hold at most 25 buttons (5 rows of 5). With 2 buttons per chore that's 10 chores per message (2 chores per row), so bigger households get the board split across several messages.
 
-### Leaderboard and summary
-- `/leaderboard [week|month|all]`: posted **in the household channel**; ranks members by story points
+### Points, goals and the leaderboard
+Points are always tracked, because the Balanced style and goals need them. Whether they're **shown and compared** is up to the owner.
+
+**Leaderboard (optional, household owner setting `leaderboard_enabled`, default on)**
+- **On:** `/leaderboard [week|month|all]` posts **in the household channel**, and summaries include the ranking.
+- **Off:** no rankings anywhere. `/leaderboard` replies that it's turned off, and summaries show only household totals. Each person can still see their own points privately with `/mypoints`.
+- **Rank by** (`leaderboard_rank_by`): **points**, or **% of goal** when goals are on. % of goal is fairer when people have different goals: a child with a 10-point goal who earns 10 ranks equal to an adult with a 40-point goal who earns 40.
+
+**Point goals (optional, per person)**
+- The owner turns goals on and picks the **goal period**: weekly or monthly (`goal_period`).
+- The owner sets a **different goal for each person** with `/goals set @user <points>`, e.g. adults 40, teenager 25, younger child 10. A person with no goal set is simply not tracked against one.
+- **Progress:** `/mypoints` shows `23 / 30 this week (77%)`. Summaries show each person's progress, or with the leaderboard off, each person gets their own progress privately (DM).
+- **Goal reached:** an optional 🎉 message when someone hits their goal (posted in the channel, or sent privately if the leaderboard is off).
+- **Balanced style + goals:** when goals are on, Balanced assigns the chore to the member furthest below their goal (by %), instead of the member with the fewest raw points.
+- **Who sets goals:** the owner and admins. Goal changes are recorded like point changes.
+
+**Commands**
+- `/leaderboard [week|month|all]` (when enabled)
+- `/mypoints`: your points this period, and your goal progress (private)
+- `/goals set @user <points>` · `/goals clear @user` · `/goals view` (owner and admins)
+
+### Summary
 - `/summary now`: runs a summary immediately
 - `/summary schedule` (owner): sets the cadence, day, time and destination
-- Summary contents: chores completed (on time and late, with days late), overdue, skipped (with skip counts), and points per member
+- Summary contents: chores completed (on time and late), overdue, skipped (with skip counts), points per member and goal progress (when enabled), and the ranking (only if the leaderboard is on)
 
 ### Reminders (each user sets their own)
 - `/reminders`: a settings menu to add, remove or toggle rules (channel + trigger + timing)
@@ -324,7 +347,7 @@ DiscordChoreChartBot/
       assignment.ts          the 5 assignment styles
       chores.ts              done / skip / reassign
       households.ts          membership and permissions
-      points.ts              leaderboard and summary totals
+      points.ts              point totals, goal progress, leaderboard ranking
     db/
       schema.ts              Drizzle schema
       client.ts
@@ -350,7 +373,7 @@ DiscordChoreChartBot/
 | **4. Board + ✅** | Board message, done, skip, take/release, event history | Clicking ✅ or 🙋 updates the chore and the board |
 | **5. Assignment styles** | Fixed, rotation, claim, random, balanced; per-chore members and rotation order | Tests for each style and member pool; household default applies to new chores |
 | **6. Discord reminders** | Scheduler, reminder rules, channel and DM delivery | Reminders arrive at the right local time |
-| **7. Leaderboard + summaries** | `/leaderboard`, `/summary now`, scheduled summaries | Weekly summary posts automatically |
+| **7. Leaderboard, goals + summaries** | Optional `/leaderboard`, per-person point goals, `/mypoints`, `/summary now`, scheduled summaries | Weekly summary posts automatically; turning the leaderboard off removes all rankings |
 | **8. Email** | Contact verification, email provider | Verified email reminders with unsubscribe |
 | **9. SMS + push** | Twilio (after 10DLC registration), ntfy | Texts and push notifications arrive |
 | **10. Public launch** | Privacy policy, terms, data deletion, rate limits, Discord bot verification | Ready for other households to add it |
